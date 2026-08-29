@@ -1,0 +1,157 @@
+"""
+WP4 - CLI interface (AROL's preferred option: "fast iteration").
+
+Commands:
+    arol-mas report kpi       --pool sample_pool
+    arol-mas report anomalies --pool sample_pool
+    arol-mas report drift     --pool sample_pool
+    arol-mas ask "Which head shows the lowest success rate?" --pool sample_pool
+    arol-mas list-pools
+    arol-mas validate --pool sample_pool
+"""
+from __future__ import annotations
+
+import logging
+import os
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from arol_mas.agent.orchestrator import ReportAgent
+from arol_mas.agent.report_writer import save_report
+from arol_mas.agent.tools import AgentContext
+from arol_mas.config import load_config
+from arol_mas.ingestion.closure_detection import detect_closures
+from arol_mas.ingestion.loader import list_pools, load_pool
+from arol_mas.ingestion.schema import validate_schema
+from arol_mas.utils.logging_config import configure_logging
+
+app = typer.Typer(help="AROL Telemetry Report Agent CLI")
+console = Console()
+
+_PRESET_QUERIES = {
+    "kpi": "Generate a KPI report: overall success rate, per-head success rate, "
+           "and torque statistics for successful closures.",
+    "anomalies": "Generate an anomaly report: out-of-range torque readings, "
+                 "statistical outliers, and which head contributes most to failures.",
+    "drift": "Generate a drift report: has torque drifted from baseline for any head, "
+              "and how has success rate evolved over time?",
+}
+
+
+def _build_context(pool: str, config: str | None) -> tuple[AgentContext, object]:
+    settings = load_config(config)
+    configure_logging(settings)
+    raw_df = load_pool(settings, pool_name=pool)
+    events = detect_closures(raw_df, settings)
+    ctx = AgentContext(raw_df=raw_df, events=events, settings=settings)
+    return ctx, settings
+
+
+@app.command("list-pools")
+def cmd_list_pools(config: str = typer.Option(None, help="Path to config.yaml")):
+    """List available dataset pools."""
+    settings = load_config(config)
+    pools = list_pools(settings)
+    if not pools:
+        console.print(f"[yellow]No pools found in {settings.pools_dir}[/yellow]")
+        raise typer.Exit(code=1)
+    for p in pools:
+        console.print(f"- {p}")
+
+
+@app.command("validate")
+def cmd_validate(
+    pool: str = typer.Option(None, help="Dataset pool name (defaults to config default)"),
+    config: str = typer.Option(None, help="Path to config.yaml"),
+):
+    """Run schema validation on a pool without generating a report."""
+    settings = load_config(config)
+    configure_logging(settings)
+    raw_df = load_pool(settings, pool_name=pool, strict=False)
+    problems = validate_schema(raw_df, settings)
+    if not problems:
+        console.print("[green]No schema issues found.[/green]")
+    else:
+        console.print(f"[red]{len(problems)} issue(s) found:[/red]")
+        for p in problems:
+            console.print(f"  - {p}")
+
+
+@app.command("report")
+def cmd_report(
+    kind: str = typer.Argument(..., help="One of: kpi, anomalies, drift"),
+    pool: str = typer.Option(None, help="Dataset pool name (defaults to config default)"),
+    config: str = typer.Option(None, help="Path to config.yaml"),
+):
+    """Generate a preset report type via the agent."""
+    if kind not in _PRESET_QUERIES:
+        console.print(f"[red]Unknown report kind '{kind}'. Choose from: {list(_PRESET_QUERIES)}[/red]")
+        raise typer.Exit(code=1)
+    _run_agent_and_save(_PRESET_QUERIES[kind], pool, config)
+
+
+@app.command("ask")
+def cmd_ask(
+    query: str = typer.Argument(..., help="Free-text question about the dataset"),
+    pool: str = typer.Option(None, help="Dataset pool name (defaults to config default)"),
+    config: str = typer.Option(None, help="Path to config.yaml"),
+):
+    """Ask a free-text question; the agent decides which tools to run."""
+    _run_agent_and_save(query, pool, config)
+
+
+def _run_agent_and_save(query: str, pool: str | None, config: str | None) -> None:
+    logger = logging.getLogger(__name__)
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        console.print(
+            "[red]ANTHROPIC_API_KEY is not set.[/red] "
+            "Export it before running agent-driven reports:\n"
+            "  export ANTHROPIC_API_KEY=sk-ant-...\n\n"
+            "(Deterministic analytics can still be inspected directly via "
+            "arol_mas.analytics without the agent - see tests/ for examples.)"
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        ctx, settings = _build_context(pool or "", config)
+    except Exception as exc:
+        console.print(f"[red]Failed to load dataset: {exc}[/red]")
+        raise typer.Exit(code=1)
+
+    dataset_label = pool or settings.data.default_pool
+    console.print(f"[cyan]Running agent on pool '{dataset_label}' for:[/cyan] {query}")
+
+    agent = ReportAgent(ctx)
+    try:
+        result = agent.run(query, dataset_label=dataset_label)
+    except Exception as exc:
+        logger.exception("Agent run failed")
+        console.print(f"[red]Agent run failed: {exc}[/red]")
+        raise typer.Exit(code=1)
+
+    out_path = save_report(result, settings, dataset_label)
+
+    console.rule("Report")
+    console.print(result.report_text)
+    console.rule()
+    console.print(f"[green]Saved to {out_path}[/green]")
+
+    if result.tool_calls:
+        table = Table(title="Tool calls made by the agent")
+        table.add_column("#")
+        table.add_column("Tool")
+        table.add_column("Input")
+        for i, call in enumerate(result.tool_calls, 1):
+            table.add_row(str(i), call["tool"], str(call["input"]))
+        console.print(table)
+
+
+def main():
+    app()
+
+
+if __name__ == "__main__":
+    main()
