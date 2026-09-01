@@ -22,9 +22,7 @@ from arol_mas.agent.orchestrator import ReportAgent
 from arol_mas.agent.report_writer import save_report
 from arol_mas.agent.tools import AgentContext
 from arol_mas.config import load_config
-from arol_mas.ingestion.closure_detection import detect_closures
-from arol_mas.ingestion.loader import list_pools, load_pool
-from arol_mas.ingestion.schema import validate_schema
+from arol_mas.ingestion.loader import list_pools, load_pool_streaming, validate_pool_files
 from arol_mas.utils.logging_config import configure_logging
 
 app = typer.Typer(help="AROL Telemetry Report Agent CLI")
@@ -43,9 +41,16 @@ _PRESET_QUERIES = {
 def _build_context(pool: str, config: str | None) -> tuple[AgentContext, object]:
     settings = load_config(config)
     configure_logging(settings)
-    raw_df = load_pool(settings, pool_name=pool)
-    events = detect_closures(raw_df, settings)
-    ctx = AgentContext(raw_df=raw_df, events=events, settings=settings)
+    # Streams the pool one file at a time (see loader.load_pool_streaming) -
+    # this is what makes it safe to point a pool at a full month (or
+    # several months) of daily telemetry files instead of just one.
+    events, idle_periods, meta = load_pool_streaming(settings, pool_name=pool)
+    ctx = AgentContext(
+        events=events,
+        settings=settings,
+        idle_periods=idle_periods,
+        data_quality_issues=meta["quality_issues"],
+    )
     return ctx, settings
 
 
@@ -66,11 +71,13 @@ def cmd_validate(
     pool: str = typer.Option(None, help="Dataset pool name (defaults to config default)"),
     config: str = typer.Option(None, help="Path to config.yaml"),
 ):
-    """Run schema validation on a pool without generating a report."""
+    """Run schema validation on a pool without generating a report.
+    Validates each file in the pool one at a time (see
+    loader.validate_pool_files) rather than loading the whole pool into
+    memory at once, so this is safe to run on a multi-month pool."""
     settings = load_config(config)
     configure_logging(settings)
-    raw_df = load_pool(settings, pool_name=pool, strict=False)
-    problems = validate_schema(raw_df, settings)
+    problems = validate_pool_files(settings, pool_name=pool)
     if not problems:
         console.print("[green]No schema issues found.[/green]")
     else:

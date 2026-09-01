@@ -60,7 +60,8 @@ def success_rate_per_head(events: pd.DataFrame) -> pd.DataFrame:
         rejected=(C.is_reject, "sum"),
     )
     grouped["attempted"] = grouped["total_closures"] - grouped["no_load"]
-    grouped["success_rate_pct"] = (100 * grouped["successful"] / grouped["attempted"].replace(0, pd.NA)).round(1)
+    attempted_f = grouped["attempted"].astype(float).replace(0, float("nan"))
+    grouped["success_rate_pct"] = (100 * grouped["successful"] / attempted_f).round(1)
     return grouped.reset_index()[
         ["head_id", "total_closures", "no_load", "attempted", "successful", "rejected", "success_rate_pct"]
     ].sort_values("success_rate_pct")

@@ -71,3 +71,20 @@ def success_rate_over_time(events: pd.DataFrame, freq: str = "1D") -> pd.DataFra
     )
     grouped["success_rate_pct"] = (100 * grouped["successful"] / grouped["attempted"]).round(1)
     return grouped.reset_index().rename(columns={"_period": "period"})
+
+
+def success_rate_by_hour_of_day(events: pd.DataFrame) -> pd.DataFrame:
+    """Success rate grouped by hour-of-day (0-23), pooling across every day
+    in the dataset. Answers 'is there a correlation between time of day and
+    failure probability?' - a pattern that success_rate_over_time (which
+    groups by calendar period, not by time-of-day) cannot show, since it
+    would keep each day separate rather than overlaying them."""
+    if events.empty:
+        return pd.DataFrame(columns=["hour", "attempted", "successful", "rejected", "success_rate_pct"])
+    ts = pd.to_datetime(events[C.timestamp])
+    attempted = events[~events[C.is_no_load]].assign(_hour=ts[~events[C.is_no_load]].dt.hour)
+    grouped = attempted.groupby("_hour").agg(
+        attempted=(C.success, "size"), successful=(C.success, "sum"), rejected=(C.is_reject, "sum")
+    )
+    grouped["success_rate_pct"] = (100 * grouped["successful"] / grouped["attempted"]).round(1)
+    return grouped.reset_index().rename(columns={"_hour": "hour"}).sort_values("hour")

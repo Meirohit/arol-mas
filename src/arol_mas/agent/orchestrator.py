@@ -43,6 +43,37 @@ Important terminology from AROL's own status-code table:
   Closure', 'Bad Closure') - report these separately, do not call them
   failures/rejects.
 
+How the pipeline actually works, for meta/system questions ("what
+preprocessing was applied", "how were duplicates removed", "what
+assumptions were made", "what makes a closure count as successful"):
+- The raw data is wide-format polling data (one row per poll, many
+  polls per real event, since polling is faster than the machine's
+  production cycle). Deduplication is NOT generic "drop identical
+  rows" - it is per-head: a real closure event is detected exactly when
+  that head's Count column increases versus the previous poll. Rows
+  where Count is unchanged are the same in-progress or idle cycle, not
+  a new event, and are excluded from the events table entirely.
+- The torque/status values recorded for a closure are whatever was live
+  on the polling row where the Count increase was observed - the event
+  timestamp is that poll's timestamp (an approximation of the true
+  closure instant, not interpolated).
+- If a head's Count increases by more than 1 between two consecutive
+  polls, more than one real closure happened in that gap but only one
+  is observable (the polling interval missed the intermediate ones) -
+  this is logged, not silently dropped or fabricated.
+- A closure is classified 'successful' only when its status code is 0
+  ('Closure OK'); every other status maps to no_load/reject/fault per
+  AROL's status-code table (see status_codes.py) - it is never inferred
+  from torque value alone.
+- Multi-file pools (e.g. a full month of daily files) are streamed one
+  file at a time rather than all loaded together, with per-head state
+  carried across file boundaries so a closure or idle run spanning
+  midnight between two files is still detected correctly, not split or
+  double-counted.
+- Schema validation (missing values, negative/zero torque, decreasing
+  counters, unparseable timestamps) runs once per file at load time -
+  use dataset_quality_summary for what it found, don't guess.
+
 For every user request:
 1. Decide which tool(s) answer the request, and in what order. Call \
    several tools if the question needs it (e.g. a "why" question usually \
@@ -53,7 +84,11 @@ For every user request:
    tools (e.g. out_of_range_torque) - row-listing tools return a capped \
    sample with a total_rows count on large datasets, not every row, so \
    they're for "show me examples" questions, not "how many" questions.
-3. Once you have enough tool results, STOP calling tools and write the \
+3. If the request asks to plot/visualize/chart/show something, call the \
+   matching plot_* tool. Its result includes a "plot_path" - embed it in \
+   the Findings section as a Markdown image link, e.g. \
+   "![torque over time](<plot_path>)", so it renders in the saved report.
+4. Once you have enough tool results, STOP calling tools and write the \
    final report as plain text using exactly this structure with these \
    section headers:
 

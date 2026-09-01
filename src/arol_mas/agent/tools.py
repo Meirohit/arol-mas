@@ -15,16 +15,33 @@ from typing import Any, Callable, Dict
 
 import pandas as pd
 
-from arol_mas.analytics import anomaly, correlation, idle, kpi, trend
+from arol_mas.analytics import anomaly, correlation, filters, kpi, plotting, trend
 from arol_mas.config import Settings
 
 
 @dataclass
 class AgentContext:
-    """Bundles the data & config every tool needs, set once per report run."""
-    raw_df: pd.DataFrame
+    """
+    Bundles the data & config every tool needs, set once per report run.
+
+    Note there is no raw wide-format polling DataFrame here on purpose:
+    for a multi-day/multi-month pool that raw data can be several GB, so
+    loader.load_pool_streaming() extracts everything a tool could need
+    from it (closure events, idle periods, data-quality issues) one file
+    at a time and discards the raw rows immediately after - see
+    loader.py for why. idle_periods and data_quality_issues below are
+    that precomputed output, not raw data.
+    """
     events: pd.DataFrame
     settings: Settings
+    idle_periods: pd.DataFrame = None
+    data_quality_issues: list = None
+
+    def __post_init__(self):
+        if self.idle_periods is None:
+            self.idle_periods = pd.DataFrame(columns=["head_id", "start", "end", "duration_s"])
+        if self.data_quality_issues is None:
+            self.data_quality_issues = []
 
 
 def _df_to_records(obj: Any, limit: int = 200) -> Any:
@@ -125,7 +142,52 @@ def _tool_rank_heads_by_deviation(ctx: AgentContext, **_kwargs) -> Any:
 
 
 def _tool_detect_idle_periods(ctx: AgentContext, **_kwargs) -> Any:
-    return _df_to_records(idle.detect_idle_periods(ctx.raw_df, ctx.settings))
+    return _df_to_records(ctx.idle_periods)
+
+
+def _tool_success_rate_by_hour_of_day(ctx: AgentContext, **_kwargs) -> Any:
+    return _df_to_records(trend.success_rate_by_hour_of_day(ctx.events))
+
+
+def _tool_list_closure_events(
+    ctx: AgentContext,
+    head_id: str | None = None,
+    status_category: str | None = None,
+    torque_min: float | None = None,
+    torque_max: float | None = None,
+    **_kwargs,
+) -> Any:
+    return _df_to_records(
+        filters.list_closure_events(
+            ctx.events, head_id=head_id, status_category=status_category,
+            torque_min=torque_min, torque_max=torque_max,
+        )
+    )
+
+
+def _tool_dataset_quality_summary(ctx: AgentContext, **_kwargs) -> dict:
+    issues = ctx.data_quality_issues or []
+    return {
+        "total_issues": len(issues),
+        "issues": issues[:50],
+        "note": "Truncated to first 50." if len(issues) > 50 else None,
+    }
+
+
+def _tool_plot_torque_over_time(ctx: AgentContext, head_id: str | None = None, **_kwargs) -> dict:
+    return plotting.plot_torque_over_time(ctx.events, ctx.settings, head_id=head_id)
+
+
+def _tool_plot_torque_histogram(ctx: AgentContext, successful_only: bool = True, **_kwargs) -> dict:
+    return plotting.plot_torque_histogram(ctx.events, ctx.settings, successful_only=successful_only)
+
+
+def _tool_plot_success_rate_per_head(ctx: AgentContext, **_kwargs) -> dict:
+    return plotting.plot_success_rate_per_head(ctx.events, ctx.settings)
+
+
+def _tool_plot_failed_closures_over_time(ctx: AgentContext, freq: str = "1D", **_kwargs) -> dict:
+    return plotting.plot_failed_closures_over_time(ctx.events, ctx.settings, freq=freq)
 
 
 # --- registry ----------------------------------------------------------
@@ -266,6 +328,58 @@ TOOL_SPECS: list[Dict[str, Any]] = [
         "description": "Lists sustained 'No Load' idle periods per head.",
         "input_schema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "success_rate_by_hour_of_day",
+        "description": "Success rate pooled by hour-of-day (0-23) across every day in the dataset - use for 'is there a correlation between time of day and failure probability?' (success_rate_over_time groups by calendar day/period instead and cannot show this).",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "list_closure_events",
+        "description": "Lists individual closure events filtered by any combination of head, status category (success/no_load/reject/fault), and torque range. Use for ad-hoc filtering questions like 'show all failed closures for head 3' or 'how many closures had torque above X Nm' that don't match a more specific tool. Returns a capped sample with a total count for large results, like every other listing tool.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "head_id": {"type": "string", "description": "e.g. 'H03'"},
+                "status_category": {"type": "string", "enum": ["success", "no_load", "reject", "fault"]},
+                "torque_min": {"type": "number"},
+                "torque_max": {"type": "number"},
+            },
+        },
+    },
+    {
+        "name": "dataset_quality_summary",
+        "description": "Schema-validation issues found while loading the dataset (missing values, negative/zero torque readings, out-of-order or decreasing counters), collected once at load time across every file in the pool - use for 'are there any missing or invalid values' questions.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "plot_torque_over_time",
+        "description": "Generates and saves a scatter plot of closing torque over time for successful closures, optionally for a single head. Returns the saved PNG path - reference it in the report so the user knows where to find it.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"head_id": {"type": "string", "description": "Optional single head id, e.g. 'H03'."}},
+        },
+    },
+    {
+        "name": "plot_torque_histogram",
+        "description": "Generates and saves a histogram of closing torque values. Returns the saved PNG path.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"successful_only": {"type": "boolean", "description": "Default true."}},
+        },
+    },
+    {
+        "name": "plot_success_rate_per_head",
+        "description": "Generates and saves a bar chart of success rate per head. Returns the saved PNG path.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "plot_failed_closures_over_time",
+        "description": "Generates and saves a bar chart of rejected-closure counts over time (daily by default). Returns the saved PNG path.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"freq": {"type": "string", "description": "Pandas offset alias, e.g. '1D', '1H'. Default '1D'."}},
+        },
+    },
 ]
 
 _TOOL_IMPLS: Dict[str, Callable[..., Any]] = {
@@ -288,6 +402,13 @@ _TOOL_IMPLS: Dict[str, Callable[..., Any]] = {
     "torque_vs_success_correlation": _tool_torque_vs_success_correlation,
     "rank_heads_by_deviation": _tool_rank_heads_by_deviation,
     "detect_idle_periods": _tool_detect_idle_periods,
+    "success_rate_by_hour_of_day": _tool_success_rate_by_hour_of_day,
+    "list_closure_events": _tool_list_closure_events,
+    "dataset_quality_summary": _tool_dataset_quality_summary,
+    "plot_torque_over_time": _tool_plot_torque_over_time,
+    "plot_torque_histogram": _tool_plot_torque_histogram,
+    "plot_success_rate_per_head": _tool_plot_success_rate_per_head,
+    "plot_failed_closures_over_time": _tool_plot_failed_closures_over_time,
 }
 
 

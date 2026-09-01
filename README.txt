@@ -87,6 +87,47 @@ also be generated with:
         --out data/pools/sample_pool/telemetry.csv \
         --minutes 11.5 --poll-hz 1.0
 
+A pool of data:
+
+    data/pools/2026-03/telemetry_<machine_id>_2026-03-01.csv
+    data/pools/2026-03/telemetry_<machine_id>_2026-03-02.csv
+    ...
+    data/pools/2026-03/telemetry_<machine_id>_2026-03-31.csv
+
+`arol-mas report` / `ask` / `validate` load every file in a pool and
+treat it as one continuous dataset. See section 4a below for how this
+scales to a full month or more without exhausting memory.
+
+
+4a. LOADING A FULL MONTH (OR MORE) OF REAL DATA
+--------------------------------------------------
+A single real AROL daily export is ~55-60 MB (86,400 polling rows x
+109 columns). So  `load_pool_streaming()` (src/arol_mas/ingestion/loader.py,
+used by every CLI command) processes one file at a time: it detects
+that file's closure events and idle periods - both of which collapse
+the 86,400 raw rows into a much smaller table - then discards the raw
+polling data before loading the next file. Column dtypes are also
+downcast (float64 -> float32, int64 -> the smallest int type that
+fits) to roughly halve the memory each file needs while it's loaded.
+
+A closure or an idle "No Load" run can span the exact boundary between
+two daily files (e.g. a run still in progress at midnight). To avoid
+splitting or double-counting these:
+  - closure detection carries a single row (the previous file's last
+    row) into the next file, so the Count-delta check at the first row
+    of a new file is still correct;
+  - idle-period detection carries an explicit "still open" state per
+    head across files, and merges it back into one run if the idle
+    period continues at the start of the next file.
+This is covered by tests/test_streaming_loader.py, which builds the
+exact same data split across one file vs. two and asserts identical
+results.
+
+On a real month of AROL data (36 heads, ~86,400 rows/day) this
+processes roughly 1 day/second and peaks at well under 1 GB RAM
+regardless of how many months are in the pool, since memory use is
+bounded by one file at a time, not by the whole pool.
+
 
 5. CONFIGURATION
 -----------------
@@ -159,6 +200,7 @@ Ask a free-text question (the agent decides which tools to call):
     arol-mas ask "Which head shows the lowest success rate?" --pool sample_pool
     arol-mas ask "Why is head 5 underperforming?" --pool sample_pool
     arol-mas ask "Compare average torque of successful vs failed closures" --pool sample_pool
+    (Ex: arol-mas ask "How many closures had torque above 2.5 Nm?" --pool 2026-03)
 
 Every run writes a timestamped Markdown report file into reports/
 (configurable via reports.output_dir) containing:
@@ -196,7 +238,8 @@ they run without an API key.
 -------------------------------------
   - torque_expected_range_nm in config.yaml is still a placeholder -
     tune it against real successful-closure torque values once you
-    have more of the real dataset to inspect.
+    have more of the real dataset to inspect (e.g. via
+    torque_statistics on a real pool).
   - Closure timestamps are approximated as the polling timestamp at
     which the Count increment was observed; finer reconstruction via
     cycle-time interpolation is possible if higher precision is
@@ -205,3 +248,39 @@ they run without an API key.
     of each head (heads don't share identical timestamps); an
     alternative is time-window binning, worth comparing in the
     documentation's experimental evaluation section.
+  - The closure-events table returned by load_pool_streaming is not
+    itself dtype-optimized (unlike the raw per-file data) - on a full
+    quarter of real data it can still reach tens of millions of rows
+    in memory. The agent-facing tools already return capped
+    samples/aggregates rather than the full table, so this mainly
+    affects how long ad-hoc analysis outside the CLI/agent takes, not
+    the CLI's own memory ceiling.
+  - Idle-run merging across a file boundary (see section 4a) closes a
+    run using the last timestamp actually observed if it doesn't
+    continue into the next file, which can under-report a run's true
+    duration by up to one polling interval at the boundary - the
+    exact end is between the two files, not directly observed.
+
+
+11. QUERY COVERAGE
+---------------------
+Every example query in AROL's proposal slides (pp.13-15) maps to a
+tool, with a few gaps closed since the first version of this repo:
+  - Filtering/conditional queries ("show all failed events for head 3",
+    "torque above X Nm") -> list_closure_events (generic filter tool)
+  - "time of day and failure probability" -> success_rate_by_hour_of_day
+    (success_rate_over_time groups by calendar day, not by
+    hour-of-day pooled across days, so it couldn't answer this)
+  - "missing or invalid torque values" -> dataset_quality_summary
+    (surfaces the schema-validation issues collected once at load time)
+  - Visualization-oriented queries (plot/histogram/chart/dashboard) ->
+    plot_torque_over_time, plot_torque_histogram,
+    plot_success_rate_per_head, plot_failed_closures_over_time - all
+    save a PNG under reports/plots/ and return its path, which the
+    agent embeds as a Markdown image in the saved report. This also
+    covers the OBJECTIVE slide's "reports + plots/tables where
+    relevant" requirement, which the tool set didn't address before.
+  - Meta/system questions ("what preprocessing steps were applied",
+    "how were duplicates removed") are answered from the agent's own
+    system-prompt knowledge of the pipeline rather than a dedicated
+    tool, since they're questions about the system, not the data.

@@ -9,3 +9,4 @@ reports/*.md
 data/pools/
 .env
 .DS_Store
+.idea

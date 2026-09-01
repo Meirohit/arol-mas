@@ -42,6 +42,7 @@ class AnalyticsConfig(BaseModel):
 class ReportsConfig(BaseModel):
     output_dir: str
     template_dir: str
+    plots_dir: str = "reports/plots"
 
 
 class AgentConfig(BaseModel):

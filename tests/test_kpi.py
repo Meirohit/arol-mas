@@ -29,6 +29,33 @@ def test_success_rate_per_head(tiny_polling_df, settings):
     assert h02_row["success_rate_pct"] == 0.0
 
 
+def test_success_rate_per_head_handles_head_with_zero_attempted(settings):
+    # Regression test for a real crash: a head that is 100% No Load
+    # (zero attempted closures) must produce NaN for success_rate_pct,
+    # not raise. `Series.replace(0, pd.NA)` on an int column upcasts to
+    # object dtype in pandas, which then breaks `.round()`.
+    import pandas as pd
+    from arol_mas.ingestion.closure_detection import ClosureEventColumns as C
+
+    rows = [
+        ("2026-05-20T00:00:00Z", "H01", 2.5, 0, True, False, False, False, "success", "ok", 1, 1),
+        ("2026-05-20T00:00:01Z", "H02", 0.0, 2, False, True, False, False, "no_load", "idle", 1, 1),
+    ]
+    cols = [C.timestamp, C.head_id, C.torque, C.status, C.success, C.is_no_load,
+            C.is_reject, C.is_fault, C.status_category, C.status_description, C.count, C.seq_gap]
+    df = pd.DataFrame(rows, columns=cols)
+    df[C.timestamp] = pd.to_datetime(df[C.timestamp], utc=True)
+
+    per_head = kpi.success_rate_per_head(df)  # must not raise
+
+    h02_row = per_head[per_head["head_id"] == "H02"].iloc[0]
+    assert h02_row["attempted"] == 0
+    assert pd.isna(h02_row["success_rate_pct"])
+
+    h01_row = per_head[per_head["head_id"] == "H01"].iloc[0]
+    assert h01_row["success_rate_pct"] == 100.0
+
+
 def test_torque_statistics_successful_only(tiny_polling_df, settings):
     events = detect_closures(tiny_polling_df, settings)
     stats = kpi.torque_statistics(events, successful_only=True)
