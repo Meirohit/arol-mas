@@ -194,6 +194,7 @@ Generate a preset report (kind is one of: kpi, anomalies, drift):
     arol-mas report kpi       --pool sample_pool
     arol-mas report anomalies --pool sample_pool
     arol-mas report drift     --pool sample_pool
+    (Ex: arol-mas report kpi --start-date 2026-03-01 --end-date 2026-03-07)
 
 Ask a free-text question (the agent decides which tools to call):
 

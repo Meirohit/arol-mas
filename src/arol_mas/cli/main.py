@@ -22,7 +22,13 @@ from arol_mas.agent.orchestrator import ReportAgent
 from arol_mas.agent.report_writer import save_report
 from arol_mas.agent.tools import AgentContext
 from arol_mas.config import load_config
-from arol_mas.ingestion.loader import list_pools, load_pool_streaming, validate_pool_files
+from arol_mas.ingestion.loader import (
+    list_pools,
+    load_period_streaming,
+    load_pool_streaming,
+    validate_period_files,
+    validate_pool_files,
+)
 from arol_mas.utils.logging_config import configure_logging
 
 app = typer.Typer(help="AROL Telemetry Report Agent CLI")
@@ -38,20 +44,35 @@ _PRESET_QUERIES = {
 }
 
 
-def _build_context(pool: str, config: str | None) -> tuple[AgentContext, object]:
+def _build_context(
+    pool: str, config: str | None, start_date: str | None = None, end_date: str | None = None, pools: str | None = None
+) -> tuple[AgentContext, object, str]:
     settings = load_config(config)
     configure_logging(settings)
-    # Streams the pool one file at a time (see loader.load_pool_streaming) -
-    # this is what makes it safe to point a pool at a full month (or
-    # several months) of daily telemetry files instead of just one.
-    events, idle_periods, meta = load_pool_streaming(settings, pool_name=pool)
+
+    if start_date or end_date:
+        # Date-range mode spans across pool folders (e.g. "Feb 12 to
+        # March 15" reaches into both the 2026-02 and 2026-03 pools) -
+        # see loader.load_period_streaming / resolve_period_files.
+        pool_list = [p.strip() for p in pools.split(",")] if pools else None
+        events, idle_periods, meta = load_period_streaming(
+            settings, pools=pool_list, start_date=start_date, end_date=end_date
+        )
+        label = f"{start_date or 'start'} to {end_date or 'end'}"
+    else:
+        # Streams the pool one file at a time (see loader.load_pool_streaming) -
+        # this is what makes it safe to point a pool at a full month (or
+        # several months) of daily telemetry files instead of just one.
+        events, idle_periods, meta = load_pool_streaming(settings, pool_name=pool)
+        label = pool or settings.data.default_pool
+
     ctx = AgentContext(
         events=events,
         settings=settings,
         idle_periods=idle_periods,
         data_quality_issues=meta["quality_issues"],
     )
-    return ctx, settings
+    return ctx, settings, label
 
 
 @app.command("list-pools")
@@ -69,15 +90,23 @@ def cmd_list_pools(config: str = typer.Option(None, help="Path to config.yaml"))
 @app.command("validate")
 def cmd_validate(
     pool: str = typer.Option(None, help="Dataset pool name (defaults to config default)"),
+    start_date: str = typer.Option(None, help="Scope to a date range instead of one pool, e.g. 2026-02-12"),
+    end_date: str = typer.Option(None, help="End of the date range (inclusive), e.g. 2026-03-15"),
+    pools: str = typer.Option(None, help="Comma-separated pool names to restrict the date-range search to (default: search all pools)"),
     config: str = typer.Option(None, help="Path to config.yaml"),
 ):
-    """Run schema validation on a pool without generating a report.
-    Validates each file in the pool one at a time (see
-    loader.validate_pool_files) rather than loading the whole pool into
-    memory at once, so this is safe to run on a multi-month pool."""
+    """Run schema validation on a pool, or a date range spanning multiple
+    pools (--start-date/--end-date), without generating a report.
+    Validates each file one at a time (see loader.validate_pool_files /
+    validate_period_files) rather than loading everything into memory at
+    once, so this is safe to run on a multi-month pool or period."""
     settings = load_config(config)
     configure_logging(settings)
-    problems = validate_pool_files(settings, pool_name=pool)
+    if start_date or end_date:
+        pool_list = [p.strip() for p in pools.split(",")] if pools else None
+        problems = validate_period_files(settings, pools=pool_list, start_date=start_date, end_date=end_date)
+    else:
+        problems = validate_pool_files(settings, pool_name=pool)
     if not problems:
         console.print("[green]No schema issues found.[/green]")
     else:
@@ -90,26 +119,45 @@ def cmd_validate(
 def cmd_report(
     kind: str = typer.Argument(..., help="One of: kpi, anomalies, drift"),
     pool: str = typer.Option(None, help="Dataset pool name (defaults to config default)"),
+    start_date: str = typer.Option(None, help="Scope to a date range instead of one pool, e.g. 2026-02-12"),
+    end_date: str = typer.Option(None, help="End of the date range (inclusive), e.g. 2026-03-15"),
+    pools: str = typer.Option(None, help="Comma-separated pool names to restrict the date-range search to (default: search all pools)"),
     config: str = typer.Option(None, help="Path to config.yaml"),
 ):
     """Generate a preset report type via the agent."""
     if kind not in _PRESET_QUERIES:
         console.print(f"[red]Unknown report kind '{kind}'. Choose from: {list(_PRESET_QUERIES)}[/red]")
         raise typer.Exit(code=1)
-    _run_agent_and_save(_PRESET_QUERIES[kind], pool, config)
+    _run_agent_and_save(_PRESET_QUERIES[kind], pool, config, start_date, end_date, pools)
 
 
 @app.command("ask")
 def cmd_ask(
     query: str = typer.Argument(..., help="Free-text question about the dataset"),
     pool: str = typer.Option(None, help="Dataset pool name (defaults to config default)"),
+    start_date: str = typer.Option(None, help="Scope to a date range instead of one pool, e.g. 2026-02-12"),
+    end_date: str = typer.Option(None, help="End of the date range (inclusive), e.g. 2026-03-15"),
+    pools: str = typer.Option(None, help="Comma-separated pool names to restrict the date-range search to (default: search all pools)"),
     config: str = typer.Option(None, help="Path to config.yaml"),
 ):
-    """Ask a free-text question; the agent decides which tools to run."""
-    _run_agent_and_save(query, pool, config)
+    """Ask a free-text question; the agent decides which tools to run.
+
+    Use --pool for a single dataset pool (the usual case), or
+    --start-date/--end-date for a request scoped by date range instead -
+    this can span multiple pool folders, e.g.
+    --start-date 2026-02-12 --end-date 2026-03-15 reaches into both the
+    2026-02 and 2026-03 pools automatically."""
+    _run_agent_and_save(query, pool, config, start_date, end_date, pools)
 
 
-def _run_agent_and_save(query: str, pool: str | None, config: str | None) -> None:
+def _run_agent_and_save(
+    query: str,
+    pool: str | None,
+    config: str | None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    pools: str | None = None,
+) -> None:
     logger = logging.getLogger(__name__)
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -123,13 +171,12 @@ def _run_agent_and_save(query: str, pool: str | None, config: str | None) -> Non
         raise typer.Exit(code=1)
 
     try:
-        ctx, settings = _build_context(pool or "", config)
+        ctx, settings, dataset_label = _build_context(pool or "", config, start_date, end_date, pools)
     except Exception as exc:
         console.print(f"[red]Failed to load dataset: {exc}[/red]")
         raise typer.Exit(code=1)
 
-    dataset_label = pool or settings.data.default_pool
-    console.print(f"[cyan]Running agent on pool '{dataset_label}' for:[/cyan] {query}")
+    console.print(f"[cyan]Running agent on '{dataset_label}' for:[/cyan] {query}")
 
     agent = ReportAgent(ctx)
     try:
