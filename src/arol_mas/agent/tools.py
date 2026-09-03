@@ -17,6 +17,7 @@ import pandas as pd
 
 from arol_mas.analytics import anomaly, correlation, filters, kpi, plotting, trend
 from arol_mas.config import Settings
+from arol_mas.ingestion.closure_detection import ClosureEventColumns as _EventCols
 
 
 @dataclass
@@ -42,6 +43,35 @@ class AgentContext:
             self.idle_periods = pd.DataFrame(columns=["head_id", "start", "end", "duration_s"])
         if self.data_quality_issues is None:
             self.data_quality_issues = []
+
+
+def _scope_events(events: pd.DataFrame, start_date: str | None, end_date: str | None) -> pd.DataFrame:
+    """
+    Restricts the FULL events table (every column, not just the reduced
+    set list_closure_events returns) to a date/time range, for tools like
+    success_rate_over_time and torque_moving_average that need to run
+    their own aggregation logic on a sub-period rather than a flat list
+    of rows. See filters.list_closure_events for the exact semantics of
+    start_date/end_date (end_date is inclusive through end-of-day when
+    no time-of-day is given).
+    """
+    if start_date is None and end_date is None:
+        return events
+    ts = pd.to_datetime(events[_EventCols.timestamp])
+    if start_date is not None:
+        start_ts = pd.Timestamp(start_date)
+        if start_ts.tzinfo is None:
+            start_ts = start_ts.tz_localize("UTC")
+        events = events[ts >= start_ts]
+        ts = pd.to_datetime(events[_EventCols.timestamp])
+    if end_date is not None:
+        end_ts = pd.Timestamp(end_date)
+        if end_ts.tzinfo is None:
+            end_ts = end_ts.tz_localize("UTC")
+        if end_ts.time() == pd.Timestamp("2000-01-01").time():
+            end_ts = end_ts + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+        events = events[ts <= end_ts]
+    return events
 
 
 def _df_to_records(obj: Any, limit: int = 200) -> Any:
@@ -93,16 +123,22 @@ def _tool_time_range(ctx: AgentContext, **_kwargs) -> dict:
     return kpi.time_range(ctx.events)
 
 
-def _tool_torque_moving_average(ctx: AgentContext, head_id: str | None = None, **_kwargs) -> Any:
-    return _df_to_records(trend.torque_moving_average(ctx.events, ctx.settings, head_id=head_id))
+def _tool_torque_moving_average(
+    ctx: AgentContext, head_id: str | None = None, start_date: str | None = None, end_date: str | None = None, **_kwargs
+) -> Any:
+    return _df_to_records(
+        trend.torque_moving_average(_scope_events(ctx.events, start_date, end_date), ctx.settings, head_id=head_id)
+    )
 
 
 def _tool_detect_drift(ctx: AgentContext, **_kwargs) -> Any:
     return _df_to_records(trend.detect_drift(ctx.events, ctx.settings))
 
 
-def _tool_success_rate_over_time(ctx: AgentContext, freq: str = "1D", **_kwargs) -> Any:
-    return _df_to_records(trend.success_rate_over_time(ctx.events, freq=freq))
+def _tool_success_rate_over_time(
+    ctx: AgentContext, freq: str = "1D", start_date: str | None = None, end_date: str | None = None, **_kwargs
+) -> Any:
+    return _df_to_records(trend.success_rate_over_time(_scope_events(ctx.events, start_date, end_date), freq=freq))
 
 
 def _tool_out_of_range_torque(ctx: AgentContext, exclude_zero_torque: bool = True, **_kwargs) -> Any:
@@ -149,18 +185,29 @@ def _tool_success_rate_by_hour_of_day(ctx: AgentContext, **_kwargs) -> Any:
     return _df_to_records(trend.success_rate_by_hour_of_day(ctx.events))
 
 
+def _tool_capping_speed_summary(ctx: AgentContext, **_kwargs) -> Any:
+    return trend.capping_speed_summary(ctx.events)
+
+
+def _tool_capping_speed_over_time(ctx: AgentContext, freq: str = "1D", **_kwargs) -> Any:
+    return _df_to_records(trend.capping_speed_over_time(ctx.events, freq=freq))
+
+
 def _tool_list_closure_events(
     ctx: AgentContext,
     head_id: str | None = None,
     status_category: str | None = None,
     torque_min: float | None = None,
     torque_max: float | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
     **_kwargs,
 ) -> Any:
     return _df_to_records(
         filters.list_closure_events(
             ctx.events, head_id=head_id, status_category=status_category,
             torque_min=torque_min, torque_max=torque_max,
+            start_date=start_date, end_date=end_date,
         )
     )
 
@@ -235,11 +282,13 @@ TOOL_SPECS: list[Dict[str, Any]] = [
     },
     {
         "name": "torque_moving_average",
-        "description": "Rolling mean of torque over successive closures, to visualize slow drift.",
+        "description": "Rolling mean of torque over successive closures, to visualize slow drift. Optionally scoped to a date/time range.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "head_id": {"type": "string", "description": "Optional single head id, e.g. 'H03'."}
+                "head_id": {"type": "string", "description": "Optional single head id, e.g. 'H03'."},
+                "start_date": {"type": "string", "description": "Optional ISO date/datetime. Inclusive."},
+                "end_date": {"type": "string", "description": "Optional ISO date/datetime. If only a date (no time), inclusive through end of that day."},
             },
         },
     },
@@ -250,11 +299,13 @@ TOOL_SPECS: list[Dict[str, Any]] = [
     },
     {
         "name": "success_rate_over_time",
-        "description": "Success rate broken down by time period, e.g. daily.",
+        "description": "Success rate broken down by time period, e.g. daily. Optionally scoped to a date/time range, e.g. 'daily breakdown for the first week' or 'success rate on March 5th'.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "freq": {"type": "string", "description": "Pandas offset alias, e.g. '1D', '1H'. Default '1D'."}
+                "freq": {"type": "string", "description": "Pandas offset alias, e.g. '1D', '1H'. Default '1D'."},
+                "start_date": {"type": "string", "description": "Optional ISO date/datetime. Inclusive."},
+                "end_date": {"type": "string", "description": "Optional ISO date/datetime. If only a date (no time), inclusive through end of that day."},
             },
         },
     },
@@ -334,8 +385,21 @@ TOOL_SPECS: list[Dict[str, Any]] = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "capping_speed_summary",
+        "description": "Overall capping speed in pieces/hour for the scoped period, using an incremental (expanding) average across all closure events - use for 'what is the capping speed / throughput / production rate'. Counts every closure event across all heads, including No Load cycles, since this is about machine cycle rate, not quality.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "capping_speed_over_time",
+        "description": "Capping speed (pieces/hour) broken down by time period, e.g. daily - use for 'how did throughput/speed change over time' rather than a single overall figure.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"freq": {"type": "string", "description": "Pandas offset alias, e.g. '1D', '1H'. Default '1D'."}},
+        },
+    },
+    {
         "name": "list_closure_events",
-        "description": "Lists individual closure events filtered by any combination of head, status category (success/no_load/reject/fault), and torque range. Use for ad-hoc filtering questions like 'show all failed closures for head 3' or 'how many closures had torque above X Nm' that don't match a more specific tool. Returns a capped sample with a total count for large results, like every other listing tool.",
+        "description": "Lists individual closure events filtered by any combination of head, status category (success/no_load/reject/fault), torque range, and date/time range. Use for ad-hoc filtering questions like 'show all failed closures for head 3' or 'how many closures had torque above X Nm' that don't match a more specific tool. Returns a capped sample with a total count for large results, like every other listing tool. IMPORTANT: for any question scoped to a specific day, week, or date range (e.g. 'last week', 'March 5-10', 'the first week of the dataset'), you MUST pass start_date/end_date - without them the capped sample returns only the EARLIEST-timestamped rows from the WHOLE dataset, silently giving a wrong answer for anything not near the very start.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -343,6 +407,8 @@ TOOL_SPECS: list[Dict[str, Any]] = [
                 "status_category": {"type": "string", "enum": ["success", "no_load", "reject", "fault"]},
                 "torque_min": {"type": "number"},
                 "torque_max": {"type": "number"},
+                "start_date": {"type": "string", "description": "ISO date/datetime, e.g. '2026-03-05' or '2026-03-05T14:00:00Z'. Inclusive."},
+                "end_date": {"type": "string", "description": "ISO date/datetime. If only a date (no time) is given, inclusive through the END of that day."},
             },
         },
     },
@@ -403,6 +469,8 @@ _TOOL_IMPLS: Dict[str, Callable[..., Any]] = {
     "rank_heads_by_deviation": _tool_rank_heads_by_deviation,
     "detect_idle_periods": _tool_detect_idle_periods,
     "success_rate_by_hour_of_day": _tool_success_rate_by_hour_of_day,
+    "capping_speed_summary": _tool_capping_speed_summary,
+    "capping_speed_over_time": _tool_capping_speed_over_time,
     "list_closure_events": _tool_list_closure_events,
     "dataset_quality_summary": _tool_dataset_quality_summary,
     "plot_torque_over_time": _tool_plot_torque_over_time,

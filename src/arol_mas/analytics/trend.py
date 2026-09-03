@@ -88,3 +88,60 @@ def success_rate_by_hour_of_day(events: pd.DataFrame) -> pd.DataFrame:
     )
     grouped["success_rate_pct"] = (100 * grouped["successful"] / grouped["attempted"]).round(1)
     return grouped.reset_index().rename(columns={"_hour": "hour"}).sort_values("hour")
+
+
+def capping_speed_summary(events: pd.DataFrame) -> dict:
+    """
+    Overall capping speed (pieces/hour) for the scoped period, using the
+    same incremental/expanding-average method as
+    closure_detection.capping_speed_pieces_per_hour (matches AROL's own
+    spec: "computes a capping speed (pieces/hour) using an incremental
+    average" - slide 5 of the proposal). Counts EVERY closure event
+    (across all heads combined, all statuses including No Load, since
+    speed is about machine cycle rate, not quality), consistent with how
+    the underlying function is defined.
+
+    Returns a single overall figure (the final, most-converged value of
+    the expanding average) plus the first-vs-last values so a caller can
+    see whether the running average was still settling or had stabilized.
+    For a day-by-day trend instead of one overall number, use
+    capping_speed_over_time.
+    """
+    from arol_mas.ingestion.closure_detection import capping_speed_pieces_per_hour
+
+    if events.empty:
+        return {"overall_pieces_per_hour": None, "n_events": 0}
+
+    speed = capping_speed_pieces_per_hour(events).dropna()
+    if speed.empty:
+        return {"overall_pieces_per_hour": None, "n_events": len(events)}
+
+    return {
+        "overall_pieces_per_hour": round(float(speed.iloc[-1]), 1),
+        "first_estimate_pieces_per_hour": round(float(speed.iloc[0]), 1),
+        "n_events": int(len(events)),
+    }
+
+
+def capping_speed_over_time(events: pd.DataFrame, freq: str = "1D") -> pd.DataFrame:
+    """
+    Capping speed (pieces/hour) broken down by time period, e.g. daily -
+    unlike capping_speed_summary's single running-average figure, this
+    shows whether throughput changed over the scoped period. Speed for
+    each period = (events in that period) / (period's actual wall-clock
+    duration in hours), across all heads combined, all statuses included
+    (see capping_speed_summary for why No Load cycles are counted here).
+    """
+    if events.empty:
+        return pd.DataFrame(columns=["period", "n_events", "pieces_per_hour"])
+
+    ts = pd.to_datetime(events[C.timestamp])
+    period = ts.dt.floor(freq)
+    counts = period.value_counts().sort_index()
+
+    period_hours = pd.Timedelta(freq).total_seconds() / 3600.0
+
+    result = counts.reset_index()
+    result.columns = ["period", "n_events"]
+    result["pieces_per_hour"] = (result["n_events"] / period_hours).round(1)
+    return result.sort_values("period").reset_index(drop=True)
