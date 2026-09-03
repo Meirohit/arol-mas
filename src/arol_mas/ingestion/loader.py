@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import List, Tuple
 
@@ -141,6 +141,19 @@ def resolve_period_files(
     have no cheap way to know if it's in range - such files are rare
     (only the bundled synthetic sample_pool doesn't follow the dated
     naming convention).
+
+    IMPORTANT: real AROL exports do NOT necessarily contain data for the
+    calendar day named in the filename - a file named "..._2026-03-07.csv"
+    was observed to actually contain rows from 2026-03-06 16:00 UTC
+    through 2026-03-07 15:59:59 UTC (an offset shift-day/timezone
+    convention in the source export), so the true tail of calendar
+    2026-03-07 lives in the file named "..._2026-03-08.csv" instead. To
+    guarantee full coverage of the requested calendar range regardless of
+    this kind of offset, the filename-date search window below is widened
+    by one day on each side; load_period_streaming then trims the
+    resulting EVENTS (by their actual timestamp, not by which file they
+    came from) back down to the exact requested
+    [start_date 00:00, end_date 23:59:59] window - see its docstring.
     """
     if pools is None:
         pool_dirs = [settings.pools_dir / p for p in list_pools(settings)]
@@ -152,6 +165,9 @@ def resolve_period_files(
 
     start = date.fromisoformat(start_date) if start_date else None
     end = date.fromisoformat(end_date) if end_date else None
+    # Widen by one day on each side - see the IMPORTANT note above.
+    search_start = (start - timedelta(days=1)) if start is not None else None
+    search_end = (end + timedelta(days=1)) if end is not None else None
 
     matched: List[Path] = []
     for pool_dir in pool_dirs:
@@ -164,9 +180,9 @@ def resolve_period_files(
             if file_date is None:
                 matched.append(p)
                 continue
-            if start is not None and file_date < start:
+            if search_start is not None and file_date < search_start:
                 continue
-            if end is not None and file_date > end:
+            if search_end is not None and file_date > search_end:
                 continue
             matched.append(p)
 
@@ -358,9 +374,62 @@ def load_period_streaming(
     this is what makes a request like "Feb 12 to March 15" work even
     though February and March live in separate pool directories: the
     file search spans every pool under settings.pools_dir (or just the
-    ones named in `pools`, if given), and only the files whose filename
-    date falls in [start_date, end_date] are streamed.
+    ones named in `pools`, if given).
+
+    Which FILES get read is decided by filename (widened by a day on
+    each side - see resolve_period_files) rather than by opening every
+    file to check its contents, since that's what keeps this cheap. But
+    real AROL exports don't reliably put calendar day D's data entirely
+    inside the file named for day D (observed: a file named for day D
+    actually contains ~16:00 UTC day D-1 through ~15:59:59 UTC day D),
+    so after streaming, the resulting EVENTS (and idle periods) are
+    trimmed by their actual timestamp back down to the exact requested
+    [start_date 00:00:00, end_date 23:59:59] window - this is what makes
+    the answer calendar-exact rather than just "whichever files happened
+    to be named close enough."
     """
     files = resolve_period_files(settings, pools=pools, start_date=start_date, end_date=end_date)
     label = f"period {start_date or '...'} to {end_date or '...'}" + (f" (pools={pools})" if pools else "")
-    return _stream_files(files, settings, strict, label=label)
+    events, idle_periods, meta = _stream_files(files, settings, strict, label=label)
+
+    if start_date is not None or end_date is not None:
+        ts_field = closure_detection.ClosureEventColumns.timestamp
+        start_ts = pd.Timestamp(start_date, tz="UTC") if start_date else None
+        end_ts = (pd.Timestamp(end_date, tz="UTC") + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)) if end_date else None
+
+        before = len(events)
+        if not events.empty:
+            # events[ts_field]'s dtype isn't guaranteed to be tz-aware
+            # at this point (depends on how it flowed through
+            # closure_detection/pd.concat), so force it explicitly
+            # before comparing against the tz-aware start_ts/end_ts -
+            # otherwise pandas raises on the comparison instead of
+            # silently doing the wrong thing, which was actually useful
+            # here: it's what caught this during testing.
+            ts = pd.to_datetime(events[ts_field], utc=True)
+            mask = pd.Series(True, index=events.index)
+            if start_ts is not None:
+                mask &= ts >= start_ts
+            if end_ts is not None:
+                mask &= ts <= end_ts
+            events = events[mask].reset_index(drop=True)
+        trimmed = before - len(events)
+
+        if not idle_periods.empty:
+            idle_ts = pd.to_datetime(idle_periods["start"], utc=True)
+            if start_ts is not None:
+                idle_periods = idle_periods[idle_ts >= start_ts]
+                idle_ts = pd.to_datetime(idle_periods["start"], utc=True)
+            if end_ts is not None:
+                idle_periods = idle_periods[idle_ts <= end_ts]
+            idle_periods = idle_periods.reset_index(drop=True)
+
+        meta["trimmed_to_exact_range"] = True
+        meta["events_trimmed_out"] = trimmed
+        logger.info(
+            "Trimmed to exact calendar range [%s, %s]: %d events removed (were outside the "
+            "requested window despite being in a file whose name fell in range), %d remain",
+            start_date, end_date, trimmed, len(events),
+        )
+
+    return events, idle_periods, meta
