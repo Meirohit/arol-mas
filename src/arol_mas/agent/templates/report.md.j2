@@ -1,0 +1,20 @@
+# AROL Telemetry Report
+
+**Generated:** {{ generated_at }}
+**Dataset pool:** {{ dataset_label }}
+**Request:** {{ query }}
+
+---
+
+{{ report_text }}
+
+---
+
+## Tool-call trace
+{% if tool_calls %}
+{% for call in tool_calls %}
+{{ loop.index }}. `{{ call.tool }}({{ call.input }})`
+{% endfor %}
+{% else %}
+_No tools were called for this request._
+{% endif %}
