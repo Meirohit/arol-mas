@@ -75,6 +75,20 @@ def _build_context(
     return ctx, settings, label
 
 
+def _resolve_date_option(date: str | None, start_date: str | None, end_date: str | None) -> tuple[str | None, str | None]:
+    """Lets --date 2026-03-04 stand in for --start-date 2026-03-04
+    --end-date 2026-03-04 without making the user type the same date
+    twice. Errors clearly rather than silently picking one if --date is
+    combined with an explicit --start-date/--end-date, since it's not
+    obvious which should win."""
+    if date is None:
+        return start_date, end_date
+    if start_date is not None or end_date is not None:
+        console.print("[red]Use either --date, or --start-date/--end-date, not both.[/red]")
+        raise typer.Exit(code=1)
+    return date, date
+
+
 @app.command("list-pools")
 def cmd_list_pools(config: str = typer.Option(None, help="Path to config.yaml")):
     """List available dataset pools."""
@@ -90,16 +104,19 @@ def cmd_list_pools(config: str = typer.Option(None, help="Path to config.yaml"))
 @app.command("validate")
 def cmd_validate(
     pool: str = typer.Option(None, help="Dataset pool name (defaults to config default)"),
+    date: str = typer.Option(None, help="Scope to a single day, e.g. 2026-03-04 (shorthand for --start-date/--end-date set to the same day)"),
     start_date: str = typer.Option(None, help="Scope to a date range instead of one pool, e.g. 2026-02-12"),
     end_date: str = typer.Option(None, help="End of the date range (inclusive), e.g. 2026-03-15"),
     pools: str = typer.Option(None, help="Comma-separated pool names to restrict the date-range search to (default: search all pools)"),
     config: str = typer.Option(None, help="Path to config.yaml"),
 ):
-    """Run schema validation on a pool, or a date range spanning multiple
-    pools (--start-date/--end-date), without generating a report.
-    Validates each file one at a time (see loader.validate_pool_files /
-    validate_period_files) rather than loading everything into memory at
-    once, so this is safe to run on a multi-month pool or period."""
+    """Run schema validation on a pool, a single day (--date), or a date
+    range spanning multiple pools (--start-date/--end-date), without
+    generating a report. Validates each file one at a time (see
+    loader.validate_pool_files / validate_period_files) rather than
+    loading everything into memory at once, so this is safe to run on a
+    multi-month pool or period."""
+    start_date, end_date = _resolve_date_option(date, start_date, end_date)
     settings = load_config(config)
     configure_logging(settings)
     if start_date or end_date:
@@ -119,6 +136,7 @@ def cmd_validate(
 def cmd_report(
     kind: str = typer.Argument(..., help="One of: kpi, anomalies, drift"),
     pool: str = typer.Option(None, help="Dataset pool name (defaults to config default)"),
+    date: str = typer.Option(None, help="Scope to a single day, e.g. 2026-03-04 (shorthand for --start-date/--end-date set to the same day)"),
     start_date: str = typer.Option(None, help="Scope to a date range instead of one pool, e.g. 2026-02-12"),
     end_date: str = typer.Option(None, help="End of the date range (inclusive), e.g. 2026-03-15"),
     pools: str = typer.Option(None, help="Comma-separated pool names to restrict the date-range search to (default: search all pools)"),
@@ -128,6 +146,7 @@ def cmd_report(
     if kind not in _PRESET_QUERIES:
         console.print(f"[red]Unknown report kind '{kind}'. Choose from: {list(_PRESET_QUERIES)}[/red]")
         raise typer.Exit(code=1)
+    start_date, end_date = _resolve_date_option(date, start_date, end_date)
     _run_agent_and_save(_PRESET_QUERIES[kind], pool, config, start_date, end_date, pools)
 
 
@@ -135,6 +154,7 @@ def cmd_report(
 def cmd_ask(
     query: str = typer.Argument(..., help="Free-text question about the dataset"),
     pool: str = typer.Option(None, help="Dataset pool name (defaults to config default)"),
+    date: str = typer.Option(None, help="Scope to a single day, e.g. 2026-03-04 (shorthand for --start-date/--end-date set to the same day)"),
     start_date: str = typer.Option(None, help="Scope to a date range instead of one pool, e.g. 2026-02-12"),
     end_date: str = typer.Option(None, help="End of the date range (inclusive), e.g. 2026-03-15"),
     pools: str = typer.Option(None, help="Comma-separated pool names to restrict the date-range search to (default: search all pools)"),
@@ -142,11 +162,13 @@ def cmd_ask(
 ):
     """Ask a free-text question; the agent decides which tools to run.
 
-    Use --pool for a single dataset pool (the usual case), or
+    Use --pool for a single dataset pool (the usual case), --date for a
+    single specific day (e.g. --date 2026-03-04), or
     --start-date/--end-date for a request scoped by date range instead -
     this can span multiple pool folders, e.g.
     --start-date 2026-02-12 --end-date 2026-03-15 reaches into both the
     2026-02 and 2026-03 pools automatically."""
+    start_date, end_date = _resolve_date_option(date, start_date, end_date)
     _run_agent_and_save(query, pool, config, start_date, end_date, pools)
 
 

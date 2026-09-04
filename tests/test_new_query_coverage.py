@@ -136,3 +136,21 @@ def test_capping_speed_over_time_two_days():
     day1 = result[result["period"] == pd.Timestamp("2026-03-01", tz="UTC")].iloc[0]
     assert day1["n_events"] == 2
     assert day1["pieces_per_hour"] == pytest.approx(2 / 24, abs=0.05)
+
+
+def test_resolve_date_option_passthrough_when_no_date_given():
+    from arol_mas.cli.main import _resolve_date_option
+    assert _resolve_date_option(None, None, None) == (None, None)
+    assert _resolve_date_option(None, "2026-03-01", "2026-03-07") == ("2026-03-01", "2026-03-07")
+
+
+def test_resolve_date_option_expands_single_date_to_range():
+    from arol_mas.cli.main import _resolve_date_option
+    assert _resolve_date_option("2026-03-04", None, None) == ("2026-03-04", "2026-03-04")
+
+
+def test_resolve_date_option_rejects_date_combined_with_range(capsys):
+    import typer
+    from arol_mas.cli.main import _resolve_date_option
+    with pytest.raises(typer.Exit):
+        _resolve_date_option("2026-03-04", "2026-03-01", None)

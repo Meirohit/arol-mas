@@ -25,9 +25,10 @@ If `--pool` is omitted, the config's default pool is used.
 ```powershell
 arol-mas ask "..." --start-date 2026-02-12 --end-date 2026-03-15
 ```
-A single day is just `--start-date` and `--end-date` set to the same date. Add
-`--pools 2026-02,2026-03` to restrict the search to specific pools instead of
-searching every pool under `data/pools/`.
+A single day is 
+```powershell
+arol-mas validate --date 2026-03-04
+```
 
 Always validate a pool/period before your first query on it:
 ```powershell
