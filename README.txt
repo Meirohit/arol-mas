@@ -234,6 +234,161 @@ they run without an API key.
   reports/                       generated report output (created at
                                   runtime)
 
+# Architecture & Agent Decision Flow
+
+## System architecture
+
+```
+                    data/pools/<name>/*.csv
+                            |
+                            v
+      +----------------------------------------------+
+      |  WP1 - src/arol_mas/ingestion/                |
+      |  loader.py: streams one file at a time         |
+      |    -> schema.py: per-file validation            |
+      |    -> closure_detection.py: Count-delta diff     |
+      |       (carry-row across file boundaries)          |
+      |    -> analytics/idle.py: idle-run detection        |
+      |       (carry-state across file boundaries)           |
+      +----------------------------------------------+
+                            |
+                events DataFrame + idle_periods DataFrame
+                            |
+                            v
+      +----------------------------------------------+
+      |  WP2 - src/arol_mas/analytics/                 |
+      |  kpi / trend / anomaly / correlation / plotting  |
+      |  - pure functions: DataFrame in -> dict/DataFrame |
+      |    or dict out. No LLM involved. Every number a    |
+      |    report cites traces back to exactly one of these |
+      +----------------------------------------------+
+                            |
+                registered as tools in agent/tools.py
+                            |
+                            v
+      +----------------------------------------------+
+      |  WP3 - src/arol_mas/agent/                     |
+      |  orchestrator.py: Claude tool-use loop            |
+      |    system prompt -> user query -> Claude picks     |
+      |    tool(s) -> tool result fed back -> repeat until  |
+      |    Claude writes the final structured report text    |
+      |  report_writer.py: renders report.md.j2, saves it,    |
+      |    embeds any plot_path as a Markdown image             |
+      +----------------------------------------------+
+                            |
+                            v
+      +----------------------------------------------+
+      |  WP4 - src/arol_mas/cli/main.py                |
+      |  typer commands: ask / report / validate /        |
+      |  list-pools. Resolves --pool vs --date vs           |
+      |  --start-date/--end-date into a file list, builds     |
+      |  an AgentContext, runs the agent, saves + prints        |
+      |  the report                                                |
+      +----------------------------------------------+
+```
+
+## Why ingestion is split from analytics
+
+WP1 never touches the LLM and WP2 never touches raw files - `events`
+(one row per real closure) and `idle_periods` are the only handoff
+between them. This split is what makes the deterministic layer testable
+in isolation (see `tests/test_kpi.py`, `test_closure_detection.py`, etc.
+- none of them need an API key) and is why the agent's outputs are
+reproducible: given the same `events` table, every tool call returns the
+exact same number every time, regardless of what the LLM decides to ask
+for.
+
+## Data schema
+
+Raw input: one row per poll, one `timestamp` column, and per head
+(`H01`...`H36`) three columns - `{head} AppTorque`, `{head} Status`,
+`{head} Count`. See README.txt section 4 for the full column reference.
+
+Internal `events` schema (one row per REAL closure, not per poll) -
+`ClosureEventColumns` in `ingestion/closure_detection.py`:
+`event_timestamp, head_id, torque, status, is_success, is_no_load,
+is_reject, is_fault, status_category, status_description, count,
+seq_gap`. `seq_gap` is >1 when the polling interval missed intermediate
+closures for that head (logged, not fabricated - see README section
+10's known limitations).
+
+## Analytics methods (one line each - see each module's docstring for
+the full method)
+
+- **kpi.py**: success/reject/fault counts and rates, overall and
+  per-head; torque mean/min/max/std, overall and per-head.
+- **trend.py**: rolling torque average; z-score drift detection (recent
+  window vs. baseline window, per head); success rate and capping speed
+  bucketed by time period or by hour-of-day.
+- **anomaly.py**: out-of-range/zero torque flags; z-score statistical
+  outliers; which head has the most genuine rejects; fault-code
+  breakdown; torque-vs-status consistency check.
+- **correlation.py**: torque correlation between two named heads
+  (aligns the i-th closure of each, since heads don't share identical
+  timestamps); torque-vs-success correlation; per-head deviation ranking
+  from fleet average.
+- **filters.py**: generic event listing/filtering by head, status
+  category, torque range, and/or date range - the catch-all for ad-hoc
+  questions that don't match a dedicated tool.
+- **plotting.py**: matplotlib PNGs (torque over time, torque histogram,
+  success rate per head, failed closures over time), saved under
+  `reports/plots/` and returned as a path for the report to embed.
+
+## Agent decision flow (WP3)
+
+For a single `ask`/`report` call:
+
+1. **CLI resolves scope -> events.** `cli/main.py` decides between
+   `--pool` (one folder), `--date`/`--start-date`/`--end-date` (a period,
+   possibly spanning multiple pool folders - see `loader.py`), builds
+   the file list, streams it, and produces the `events` +
+   `idle_periods` tables. This step is 100% deterministic and involves
+   no LLM call.
+2. **Claude receives the query + tool list.** `orchestrator.py` sends
+   the user's question, the system prompt (status-code terminology +
+   pipeline description, so meta-questions like "how were duplicates
+   removed" are grounded in what the code actually does, not guessed),
+   and the full `TOOL_SPECS` schema to the model.
+3. **Claude calls zero or more tools, in a loop.** Each tool call goes
+   through `run_tool()` in `tools.py`, which dispatches to the matching
+   analytics function against the `AgentContext` (the loaded
+   events/idle_periods/settings). Results are fed back to Claude, which
+   can call more tools based on what it learned (e.g. call
+   `success_rate_per_head` first, see an outlier head, then call
+   `torque_statistics_per_head` filtered to just that head next -
+   this is the "autonomously selecting analysis steps" objective slide
+   3 asks for).
+4. **Claude writes the final report text** in the fixed structure: goal
+   -> data used -> analyses executed -> findings -> confidence & limits
+   -> next checks. It is instructed to use only numbers tools actually
+   returned, never invent figures, and to embed any `plot_path` as a
+   Markdown image.
+5. **`report_writer.py` renders and saves** the report through
+   `report.md.j2`, including the full tool-call trace, so the report is
+   both human-readable and auditable after the fact - anyone can see
+   exactly which tools ran with which arguments and re-derive the
+   numbers independently (as this project's own QA process has done
+   repeatedly - see the "how the numbers were verified" note below).
+
+### Graceful failure
+
+If a tool call raises (e.g. a real bug once found in `success_rate_per_head`
+on a zero-attempted head), the orchestrator logs the exception, the tool
+returns nothing rather than crashing the whole run, and Claude is
+expected to note the gap explicitly in Confidence & Limits and fall back
+to other tools rather than fabricating a number - see any report where a
+tool failure appears in the log but the final report still reads
+coherently and honestly about what it could and couldn't determine.
+
+## How the numbers were verified
+
+Every core metric this system produces (success rates, torque stats,
+per-head reject counts, capping speed, idle-period boundaries) has been
+independently re-derived from the raw CSVs using plain pandas - outside
+this codebase entirely - during development, and matched exactly. This
+is the strongest evidence available that the ingestion/analytics layer
+is computing correctly rather than merely running without errors.
+
 
 10. KNOWN LIMITATIONS / NEXT STEPS
 -------------------------------------
