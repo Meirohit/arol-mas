@@ -9,3 +9,6 @@ data/pools/
 .env
 .DS_Store
 .idea
+webapp/node_modules/
+webapp/dist/
+webapp/.env
