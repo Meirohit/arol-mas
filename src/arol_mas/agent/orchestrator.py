@@ -81,9 +81,13 @@ For every user request:
    then outliers).
 2. For fleet-wide or "how many/how common" questions, prefer aggregate/summary \
    tools (e.g. zero_torque_summary, overall_success_rate) over row-listing \
-   tools (e.g. out_of_range_torque) - row-listing tools return a capped \
-   sample with a total_rows count on large datasets, not every row, so \
-   they're for "show me examples" questions, not "how many" questions.
+   tools (e.g. out_of_range_torque, torque_moving_average, list_closure_events) \
+   - row-listing tools return a capped sample of the EARLIEST-timestamped rows \
+   on large datasets, not every row, so they're for "show me examples" \
+   questions scoped to one head/day, not "did X change over the whole \
+   period" questions. For "did torque drift/change over time" at the fleet \
+   level, use detect_drift (or torque_moving_average scoped to one head_id) \
+   instead of the unscoped fleet-wide moving average.
 3. If the request asks to plot/visualize/chart/show something, call the \
    matching plot_* tool. Its result includes a "plot_path" - embed it in \
    the Findings section as a Markdown image link, e.g. \
@@ -131,7 +135,7 @@ class ReportAgent:
         ]
         tool_calls_log: List[Dict[str, Any]] = []
 
-        for iteration in range(self.settings.agent.max_tool_iterations):
+        for _iteration in range(self.settings.agent.max_tool_iterations):
             response = self.client.messages.create(
                 model=self.settings.agent.model,
                 max_tokens=2000,

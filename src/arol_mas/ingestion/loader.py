@@ -69,9 +69,16 @@ def load_pool(settings: Settings, pool_name: str | None = None, strict: bool = F
 
     ts_col = settings.schema_.timestamp_col
     df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce", utc=True)
+
+    # Validate BEFORE sorting: validate_schema's "timestamp is not
+    # monotonically increasing" check is only meaningful on the data in
+    # the order it actually arrived in. Sorting first (as this function
+    # used to) makes that check permanently vacuous - it can never fire,
+    # since by the time it runs the data has already been reordered into
+    # a monotonic sequence.
+    problems = validate_schema(df, settings)
     df = df.dropna(subset=[ts_col]).sort_values(ts_col).reset_index(drop=True)
 
-    problems = validate_schema(df, settings)
     if problems:
         msg = f"Schema validation found {len(problems)} issue(s) in pool '{pool_name}':\n" + "\n".join(
             f"  - {p}" for p in problems
@@ -222,7 +229,8 @@ def _validate_files(files: List[Path], settings: Settings) -> List[str]:
     for path in files:
         df = _load_single_file(path)
         df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce", utc=True)
-        df = df.sort_values(ts_col).reset_index(drop=True)
+        # Validate before sorting - see load_pool's comment on the same
+        # pattern; sorting first makes the monotonicity check vacuous.
         for p in validate_schema(df, settings):
             problems.append(f"{path.name}: {p}")
         del df
@@ -272,10 +280,14 @@ def _stream_files(files: List[Path], settings: Settings, strict: bool, label: st
         df = _load_single_file(path)
         df = _optimize_dtypes(df, settings)
         df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce", utc=True)
-        df = df.dropna(subset=[ts_col]).sort_values(ts_col).reset_index(drop=True)
 
+        # Validate before sorting - see load_pool's identical comment;
+        # the monotonicity check is meaningless once the rows have
+        # already been reordered.
         for p in validate_schema(df, settings):
             quality_issues.append(f"{path.name}: {p}")
+
+        df = df.dropna(subset=[ts_col]).sort_values(ts_col).reset_index(drop=True)
 
         total_raw_rows += len(df)
 

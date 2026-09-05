@@ -78,11 +78,28 @@ def validate_schema(df: pd.DataFrame, settings: Settings) -> List[str]:
                 )
 
         if hc.torque_col in df.columns:
-            bad_torque = df[hc.torque_col].dropna()
-            n_zero = (bad_torque == 0).sum()
+            # Zero torque is EXPECTED and normal for "No Load" (status 2)
+            # cycles - the head rotated with no bottle present, so there
+            # was nothing to apply torque to. Flagging every one of those
+            # as a data-quality "problem" floods this report with false
+            # positives on real data (No Load is the dominant outcome -
+            # see data/generate_sample_data.py's docstring, ~80%+ of raw
+            # closures). Only a zero-torque reading NOT accompanied by a
+            # No Load status is actually suspicious (see also
+            # anomaly.torque_status_consistency_check, which cross-checks
+            # this same pair of signals on the cleaned closure-events
+            # table - this is the raw-polling-data equivalent, run once
+            # at load time).
+            torque = df[hc.torque_col]
+            if hc.status_col in df.columns:
+                zero_mask = (torque == 0) & df[hc.status_col].notna() & (df[hc.status_col] != 2)
+            else:
+                zero_mask = torque == 0
+            n_zero = int(zero_mask.fillna(False).sum())
             if n_zero:
                 problems.append(
-                    f"{n_zero} zero torque reading(s) in '{hc.torque_col}'"
+                    f"{n_zero} zero torque reading(s) in '{hc.torque_col}' NOT marked 'No Load' "
+                    f"(status != 2) - unlike No Load's expected zero torque, this combination is unexpected"
                 )
 
         if hc.count_col in df.columns:

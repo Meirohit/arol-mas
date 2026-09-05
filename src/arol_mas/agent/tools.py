@@ -282,7 +282,7 @@ TOOL_SPECS: list[Dict[str, Any]] = [
     },
     {
         "name": "torque_moving_average",
-        "description": "Rolling mean of torque over successive closures, to visualize slow drift. Optionally scoped to a date/time range.",
+        "description": "Rolling mean of torque over successive closures, to visualize slow drift for ONE head or a narrow date range. Returns a capped sample (like every other listing tool) of the EARLIEST-timestamped rows when the result is large - for a fleet-wide, unscoped, multi-day question like 'did average torque change over the month', this tool will silently only show the very first few minutes of data. For that kind of question use detect_drift (baseline-vs-recent per head) or scope this tool to a single head_id and/or a narrow start_date/end_date instead.",
         "input_schema": {
             "type": "object",
             "properties": {
