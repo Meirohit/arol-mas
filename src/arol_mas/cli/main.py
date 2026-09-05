@@ -196,7 +196,7 @@ def _run_agent_and_save(
         ctx, settings, dataset_label = _build_context(pool or "", config, start_date, end_date, pools)
     except Exception as exc:
         console.print(f"[red]Failed to load dataset: {exc}[/red]")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from exc
 
     console.print(f"[cyan]Running agent on '{dataset_label}' for:[/cyan] {query}")
 
@@ -206,7 +206,7 @@ def _run_agent_and_save(
     except Exception as exc:
         logger.exception("Agent run failed")
         console.print(f"[red]Agent run failed: {exc}[/red]")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from exc
 
     out_path = save_report(result, settings, dataset_label)
 

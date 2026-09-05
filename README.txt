@@ -209,6 +209,34 @@ Every run writes a timestamped Markdown report file into reports/
   / Next checks, plus a trace of every tool call the agent made.
 
 
+7a. RUNNING THE WEB UI (optional, WP4 web variant)
+-----------------------------------------------------
+This is an additional transport on top of the same WP1-WP3 code -
+nothing analytical lives in it. Two processes:
+
+Backend (FastAPI, from the project root, with ANTHROPIC_API_KEY set):
+
+    pip install -r requirements.txt
+    python -m uvicorn arol_mas.webapi.server:app --reload --reload-dir src --port 8000
+
+(--reload-dir src keeps the auto-reloader from watching data/ and
+reports/, which otherwise triggers restarts every time a dataset pool
+or report file changes.)
+
+Frontend (from webapp/):
+
+    cd webapp
+    npm install
+    npm run dev
+
+Then open the Vite dev server URL (default http://localhost:5173).
+It talks to the backend at VITE_API_BASE (webapp/.env, default
+http://localhost:8000).
+
+For a production build: `npm run build` in webapp/ produces webapp/dist/,
+which can be served by any static file server.
+
+
 8. TESTING
 -----------
     PYTHONPATH=src pytest tests/ -v
@@ -230,6 +258,9 @@ they run without an API key.
   src/arol_mas/agent/            WP3: tool registry + orchestrator
                                   (report agent) + report templates
   src/arol_mas/cli/               WP4: command-line interface
+  src/arol_mas/webapi/           WP4 (web variant): FastAPI backend
+                                  serving the same agent over REST
+  webapp/                        WP4 (web variant): React/Vite frontend
   tests/                         pytest suite
   reports/                       generated report output (created at
                                   runtime)

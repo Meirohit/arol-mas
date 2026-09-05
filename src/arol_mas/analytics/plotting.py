@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 
 import matplotlib
 
@@ -42,7 +41,26 @@ def _save(fig, settings: Settings, name: str) -> str:
     out_path = out_dir / f"{stamp}_{_slugify(name)}.png"
     fig.savefig(out_path, dpi=110, bbox_inches="tight")
     plt.close(fig)
-    return str(out_path)
+
+    # Return a path RELATIVE to the reports output directory (e.g.
+    # "plots/20260904T093217Z_success-rate-per-head.png") rather than an
+    # absolute filesystem path. report_writer.py embeds this string
+    # verbatim as a Markdown image link; an absolute, machine-local,
+    # OS-specific path (e.g. "C:\Users\name\...") only ever renders on the
+    # exact machine that generated it - it breaks when the report is
+    # opened on another machine, or served by the web backend to a
+    # browser that has no filesystem access at all. A path relative to
+    # reports_dir resolves correctly wherever the reports/ folder is
+    # opened from, and is what the web backend's /api/reports/{id}/html
+    # and /pdf endpoints (and any static file server pointed at
+    # reports/) expect.
+    try:
+        rel = out_path.relative_to(settings.reports_dir)
+        return str(rel).replace("\\", "/")
+    except ValueError:
+        # plots_dir configured outside reports_dir - fall back to
+        # absolute, but this should not happen with the default config.
+        return str(out_path)
 
 
 def plot_torque_over_time(events: pd.DataFrame, settings: Settings, head_id: str | None = None) -> dict:

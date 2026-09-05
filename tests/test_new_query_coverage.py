@@ -97,15 +97,22 @@ def test_plot_torque_over_time_writes_file(settings, tmp_path, events):
     from pathlib import Path
     plot_settings = settings.model_copy(update={"project_root": tmp_path})
     result = plotting.plot_torque_over_time(events, plot_settings)
-    assert Path(result["plot_path"]).exists()
-    assert Path(result["plot_path"]).suffix == ".png"
+    # plot_path is relative to reports_dir (see plotting.py::_save() -
+    # returning an absolute, machine-local path broke report rendering on
+    # any machine other than the one that generated it, including every
+    # web-served report).
+    assert not Path(result["plot_path"]).is_absolute()
+    resolved = plot_settings.reports_dir / result["plot_path"]
+    assert resolved.exists()
+    assert resolved.suffix == ".png"
 
 
 def test_plot_success_rate_per_head_writes_file(settings, tmp_path, events):
     from pathlib import Path
     plot_settings = settings.model_copy(update={"project_root": tmp_path})
     result = plotting.plot_success_rate_per_head(events, plot_settings)
-    assert Path(result["plot_path"]).exists()
+    assert not Path(result["plot_path"]).is_absolute()
+    assert (plot_settings.reports_dir / result["plot_path"]).exists()
 
 
 def test_capping_speed_summary_returns_a_positive_rate(events):

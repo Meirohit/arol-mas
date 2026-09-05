@@ -25,10 +25,20 @@ def list_closure_events(
     status_category: str | None = None,
     torque_min: float | None = None,
     torque_max: float | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> pd.DataFrame:
     """
     Filters the closure-events table by any combination of head, status
-    category (success/no_load/reject/fault), and torque range.
+    category (success/no_load/reject/fault), torque range, and date/time
+    range.
+
+    start_date/end_date accept an ISO date ("2026-03-05") or full
+    ISO datetime ("2026-03-05T14:00:00Z"). When only a bare date is given,
+    start_date is treated as the start of that day (00:00:00) and end_date
+    as the END of that day (23:59:59.999...), i.e. end-inclusive - matching
+    the semantics already used by tools.py::_scope_events() and
+    loader.load_period_streaming() elsewhere in this codebase.
 
     Returns the matching rows (timestamp, head_id, torque, status_category,
     status_description). Callers that only need a count should use
@@ -53,6 +63,23 @@ def list_closure_events(
         result = result[result[C.torque] >= torque_min]
     if torque_max is not None:
         result = result[result[C.torque] <= torque_max]
+
+    if (start_date is not None or end_date is not None) and not result.empty:
+        ts = pd.to_datetime(result[C.timestamp], utc=True)
+        if start_date is not None:
+            start_ts = pd.Timestamp(start_date)
+            if start_ts.tzinfo is None:
+                start_ts = start_ts.tz_localize("UTC")
+            result = result[ts >= start_ts]
+            ts = pd.to_datetime(result[C.timestamp], utc=True)
+        if end_date is not None:
+            end_ts = pd.Timestamp(end_date)
+            if end_ts.tzinfo is None:
+                end_ts = end_ts.tz_localize("UTC")
+                # bare date (no time-of-day) -> inclusive through end of day
+                if len(str(end_date)) <= 10:
+                    end_ts = end_ts + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+            result = result[ts <= end_ts]
 
     cols = [C.timestamp, C.head_id, C.torque, C.status_category, C.status_description]
     return result[cols].sort_values(C.timestamp).reset_index(drop=True)
