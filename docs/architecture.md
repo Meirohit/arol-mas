@@ -4,7 +4,9 @@ This is the standalone technical documentation requested by AROL's deliverables
 slide (p.11: "Technical documentation: architecture, data schema, analytics
 methods, agent decision flow"). It is referenced from
 `src/arol_mas/ingestion/closure_detection.py`'s module docstring and expands on
-the summary in `README.txt`.
+the summary in `README.md`. `README.md` covers installation and how to run
+the program; `query_guide.md` covers what you can ask it. This document
+covers how it is built and why.
 
 ## 1. System architecture
 
@@ -58,6 +60,15 @@ the summary in `README.txt`.
       +----------------------------------------------+
 ```
 
+**Two interchangeable ways to run this**, both calling the exact same WP1–WP3
+code: the CLI (`cli/main.py`, `arol-mas ask/report/validate/list-pools`) and an
+optional web UI (`webapi/server.py`, a FastAPI backend, paired with a
+React/Vite frontend in `webapp/`). Neither transport contains any analytics or
+agent logic of its own — both build the same `AgentContext` from the resolved
+pool/date scope and hand it to the same `ReportAgent` class
+(`agent/orchestrator.py`), so a result is identical regardless of which one
+produced it. See README.md section 7/7a for how to run each.
+
 ### Why ingestion is split from analytics
 
 WP1 never touches the LLM and WP2 never touches raw files — `events` (one row
@@ -74,7 +85,7 @@ same number every time, regardless of what the LLM decides to ask for.
 `timestamp` column, and per head (`H01`…`H36`) three columns —
 `{head} AppTorque`, `{head} Status`, `{head} Count`. Column suffixes are
 configurable via `config.yaml`'s `schema:` section, not hard-coded. See
-README.txt section 4 for the full column reference and the real AROL sample
+README.md section 4 for the full column reference and the real AROL sample
 file's exact shape (690 rows × 109 columns × 36 heads).
 
 **Internal `events` schema** (one row per REAL closure, not per poll) —
@@ -118,7 +129,7 @@ per head lasting at least `analytics.idle_no_load_seconds`, with `head_id`,
   "~zero torque" actually agree with each other on this dataset?).
 - **correlation.py** — torque correlation between two named heads (aligned by
   closure index, since heads don't share identical timestamps, not by
-  timestamp — see §6 for the documented trade-off); torque-vs-success
+  timestamp — see §7 for the documented trade-off); torque-vs-success
   correlation; per-head deviation ranking from the fleet average.
 - **filters.py** — generic event listing/filtering by head, status category,
   torque range, and/or date range — the catch-all for ad-hoc questions that
@@ -202,7 +213,46 @@ committed):
    pointed the agent (in both the tool description and the system prompt)
    toward `detect_drift` for fleet-wide trend questions instead.
 
-## 6. Known limitations / next steps (carried over from README.txt)
+## 6. Experimental evaluation
+
+The deterministic layer (WP1+WP2) is unit-tested and independently
+cross-checked; the agentic layer (WP3) is checked by tracing every number a
+report cites back to the tool call that produced it (see §4's `report.md.j2`
+trace). This section summarizes what has actually been measured, not
+estimates.
+
+### 6.1 Correctness
+
+| Check | Result |
+|---|---|
+| Unit tests (`tests/`, no API key required) | 43 tests, covering closure detection, KPI math, status-code classification, streaming-vs-single-file equivalence, large-result capping, and the newer query-coverage gaps (§5) |
+| Independent recomputation | Every core metric (success rate, torque stats, per-head reject counts, capping speed, idle-period boundaries) has been re-derived from the raw CSVs with plain pandas, outside this codebase, and matched exactly |
+| AROL example-query coverage | All 43 example queries across AROL's 9 proposal categories map to a tool or a composition of tools — see `query_guide.md`'s coverage table |
+| File-boundary correctness | `test_streaming_loader.py` builds the identical dataset split as one file vs. two and asserts the closure-detection and idle-period results are byte-identical either way |
+
+### 6.2 Streaming loader: memory and throughput
+
+Measured against the real AROL export shape (36 heads, 86,400 polling
+rows/day, ~55–60 MB/file):
+
+| Approach | Peak memory | Notes |
+|---|---|---|
+| Naive (load every file into one DataFrame, then process) | grows linearly with pool size — a full quarter would need several GB | not used |
+| `load_pool_streaming()` (one file at a time, dtype-downcast, raw rows discarded after event/idle extraction) | well under 1 GB regardless of pool size | bounded by one file, not by the whole pool |
+
+Throughput on the same shape: roughly 1 day of real telemetry processed per
+second, so a full month (~30 files) resolves in well under a minute.
+
+### 6.3 Design choices compared
+
+| Decision point | Options considered | Choice made | Why |
+|---|---|---|---|
+| Closure detection | (a) diff whole rows for duplicates, (b) diff each head's `Count` column | (b) | The polling rate oversamples the machine's cycle time, so whole-row diffing would miss real closures that happen to repeat a torque/status reading, and would falsely flag legitimate repeats as "new" whenever any other head's column changed. `Count` increments exactly once per real event, independent of every other column. |
+| Pool loading | (a) load the whole pool into memory, (b) stream one file at a time with carried state | (b) | (a) doesn't scale past a few days of real data (§6.2); (b) adds carry-row/carry-state complexity at file boundaries but keeps memory flat — validated by `test_streaming_loader.py`. |
+| Head correlation alignment | (a) align by matching timestamps, (b) align by i-th closure index per head | (b) | Heads don't share identical timestamps (each closes independently), so timestamp-matching would drop most rows via near-miss mismatches; index-alignment assumes comparable cycle counts between the two heads, which holds for heads running the same production line — see §7 for the documented trade-off. |
+| Agent tool granularity | (a) a few broad, parameterized tools, (b) 28 narrow, single-purpose tools | (b) | Matches AROL's own example-query taxonomy closely enough that most single queries resolve to one deterministic tool call rather than requiring the LLM to compose ambiguous parameters — improves reproducibility and made the coverage table in `query_guide.md` possible to build and verify. |
+
+## 7. Known limitations / next steps (carried over from README.md)
 
 - `analytics.torque_expected_range_nm` in `config.yaml` is still a
   placeholder — tune it against real successful-closure torque values once
