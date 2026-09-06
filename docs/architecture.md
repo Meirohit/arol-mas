@@ -85,8 +85,7 @@ same number every time, regardless of what the LLM decides to ask for.
 `timestamp` column, and per head (`H01`…`H36`) three columns —
 `{head} AppTorque`, `{head} Status`, `{head} Count`. Column suffixes are
 configurable via `config.yaml`'s `schema:` section, not hard-coded. See
-README.txt section 4 for the full column reference and the real AROL sample
-file's exact shape (690 rows × 109 columns × 36 heads).
+README.txt section 4 for the full column reference.
 
 **Internal `events` schema** (one row per REAL closure, not per poll) —
 `ClosureEventColumns` in `ingestion/closure_detection.py`:
@@ -121,7 +120,7 @@ per head lasting at least `analytics.idle_no_load_seconds`, with `head_id`,
   z-score drift detection (first-half vs second-half baseline, per head);
   success rate and capping speed bucketed by calendar period or by
   hour-of-day; capping speed via AROL's requested incremental/expanding
-  average of inter-closure time deltas (slide 5), computed across all heads
+  average of inter-closure time deltas, computed across all heads
   and all statuses (a machine-cycle-rate metric, not a quality metric).
 - **anomaly.py** — fixed-range and zero-torque flags; per-head z-score
   statistical outliers; which head has the most genuine rejects; fault-code
@@ -136,8 +135,7 @@ per head lasting at least `analytics.idle_no_load_seconds`, with `head_id`,
   don't match a dedicated tool.
 - **plotting.py** — matplotlib PNGs (torque over time, torque histogram,
   success rate per head, failed closures over time), saved under
-  `reports/plots/` and returned as a path for the report to embed. Satisfies
-  the OBJECTIVE slide's "reports + plots/tables where relevant" requirement.
+  `reports/plots/` and returned as a path for the report to embed.
 
 All of WP2 is pure functions (DataFrame in → dict/DataFrame out), independent
 of the LLM, and unit-tested directly (see `tests/`).
