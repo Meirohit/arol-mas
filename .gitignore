@@ -11,3 +11,4 @@ logs/
 webapp/node_modules/
 webapp/dist/
 webapp/.env
+data/pools/

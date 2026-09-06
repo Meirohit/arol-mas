@@ -3,16 +3,7 @@
 
 data:
   pools_dir: "data/pools"          # directory containing dataset pools (csv/json/parquet)
-<<<<<<< HEAD
-  # "2026-03" ships with the repo under data/pools/ - a bare `arol-mas
-  # report kpi` / `arol-mas ask "..."` / `arol-mas validate` with no
-  # --pool flag needs this to point at something that actually exists.
-  # If you generate your own sample pool via data/generate_sample_data.py,
-  # point this at that pool's folder name instead.
-  default_pool: "2026-03"
-=======
   default_pool: "sample_pool"
->>>>>>> origin/main
 
 heads:
   # Real AROL Equatorque schema: 36 capping heads, H01..H36
