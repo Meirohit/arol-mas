@@ -68,11 +68,13 @@ one or more CSV, JSON, or Parquet files with this wide-format schema
 Note the column names are SPACE-separated ("H01 Count"), not
 underscore-separated. This is configured in config.yaml under
 schema.torque_suffix / schema.status_suffix / schema.count_suffix -
+if AROL later hands you a differently-formatted export, only that
+config section needs to change, not the code.
 
 Because the polling rate is faster than the machine's production
 cycle, most consecutive rows repeat the same Count value for a head.
 A closure event is detected precisely when a head's Count increases
-between two consecutive polls - not by comparing whole rows for
+between two consecutive polls - NOT by comparing whole rows for
 duplication. This is the core cleaning logic (see
 src/arol_mas/ingestion/closure_detection.py).
 
@@ -225,6 +227,7 @@ or report file changes.)
 Frontend (from webapp/, in a second terminal, backend already running):
 
     cd webapp
+    cp .env.example .env    (first time only - sets VITE_API_BASE)
     npm install
     npm run dev
 

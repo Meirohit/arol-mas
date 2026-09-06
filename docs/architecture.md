@@ -4,7 +4,7 @@ This is the standalone technical documentation requested by AROL's deliverables
 slide (p.11: "Technical documentation: architecture, data schema, analytics
 methods, agent decision flow"). It is referenced from
 `src/arol_mas/ingestion/closure_detection.py`'s module docstring and expands on
-the summary in `README.md`. `README.md` covers installation and how to run
+the summary in `README.txt`. `README.txt` covers installation and how to run
 the program; `query_guide.md` covers what you can ask it. This document
 covers how it is built and why.
 
@@ -67,7 +67,7 @@ React/Vite frontend in `webapp/`). Neither transport contains any analytics or
 agent logic of its own — both build the same `AgentContext` from the resolved
 pool/date scope and hand it to the same `ReportAgent` class
 (`agent/orchestrator.py`), so a result is identical regardless of which one
-produced it. See README.md section 7/7a for how to run each.
+produced it. See README.txt section 7/7a for how to run each.
 
 ### Why ingestion is split from analytics
 
@@ -85,7 +85,7 @@ same number every time, regardless of what the LLM decides to ask for.
 `timestamp` column, and per head (`H01`…`H36`) three columns —
 `{head} AppTorque`, `{head} Status`, `{head} Count`. Column suffixes are
 configurable via `config.yaml`'s `schema:` section, not hard-coded. See
-README.md section 4 for the full column reference and the real AROL sample
+README.txt section 4 for the full column reference and the real AROL sample
 file's exact shape (690 rows × 109 columns × 36 heads).
 
 **Internal `events` schema** (one row per REAL closure, not per poll) —
@@ -252,7 +252,53 @@ second, so a full month (~30 files) resolves in well under a minute.
 | Head correlation alignment | (a) align by matching timestamps, (b) align by i-th closure index per head | (b) | Heads don't share identical timestamps (each closes independently), so timestamp-matching would drop most rows via near-miss mismatches; index-alignment assumes comparable cycle counts between the two heads, which holds for heads running the same production line — see §7 for the documented trade-off. |
 | Agent tool granularity | (a) a few broad, parameterized tools, (b) 28 narrow, single-purpose tools | (b) | Matches AROL's own example-query taxonomy closely enough that most single queries resolve to one deterministic tool call rather than requiring the LLM to compose ambiguous parameters — improves reproducibility and made the coverage table in `query_guide.md` possible to build and verify. |
 
-## 7. Known limitations / next steps (carried over from README.md)
+### 6.4 Run against real AROL data (1 week, Feb 2026)
+
+§6.1–6.3 above were validated on the synthetic generator; this run instead
+uses the pipeline unmodified against seven real daily exports from a live
+AROL machine (`telemetry_MCC777eda3db57348ef8a3113a642ae74db`, Feb 1–7 2026 —
+36 heads, ~86,400 polling rows/day, matching the schema in §2 exactly).
+Reproduce with `arol-mas report kpi --pool <pool containing those 7 files>`.
+
+**Overall KPI** (`overall_success_rate`, `torque_statistics`):
+
+| total closures | no load | attempted | successful | rejected | success rate | mean torque | torque std |
+|---|---|---|---|---|---|---|---|
+| 3,900,981 | 1,758,822 | 2,142,159 | 2,142,048 | 111 | 100.0% | 2.00 Nm | 0.04 Nm |
+
+**Per-head, worst 4 by reject count** (`success_rate_per_head`, all still round to
+a 100.0% success rate — the per-head *rate* is too coarse to show the real
+spread; reject *count* isn't):
+
+| head | attempted | rejected |
+|---|---|---|
+| H31 | 59,488 | 11 |
+| H32 | 59,479 | 11 |
+| H30 | 59,520 | 10 |
+| H22 | 59,540 | 9 |
+
+**A genuine data-quality finding**, caught by
+`torque_status_consistency_check` on this real slice — not a synthetic edge
+case:
+
+| check | count | as % of that status's closures |
+|---|---|---|
+| status = success but torque ≈ 0 Nm | 665 | 0.03% of 2,142,048 successful |
+| status = No Load but torque ≠ 0 Nm | 698 | 0.04% of 1,758,822 No Load |
+
+Both are small fractions of their respective status groups (~0.03–0.04%) but non-zero, and
+spread across most heads rather than concentrated in one — consistent with
+occasional sensor/status-timing misalignment rather than a single faulty
+head. This is exactly the situation `torque_status_consistency_check` and
+the schema-level zero-torque handling (§5, fix 1) exist to surface.
+
+![Closing torque over time, one real week — the near-zero cluster along the
+bottom is the anomaly above: status says "success" but torque reads ~0](images/eval_torque_over_time.png)
+
+![Rejected closures per day, one real week — a real day-to-day spread (4–32),
+not a flat line](images/eval_rejected_over_time.png)
+
+## 7. Known limitations / next steps (carried over from README.txt)
 
 - `analytics.torque_expected_range_nm` in `config.yaml` is still a
   placeholder — tune it against real successful-closure torque values once
